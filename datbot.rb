@@ -1,0 +1,11 @@
+#Again, see https://github.com/MusikAnimal/MusikBot/blob/master/musikbot.rb for original
+require 'optparse'
+require 'i18n'
+require 'mediawiki-gateway'
+require 'redis'
+require 'mysql2'
+require 'repl'
+require 'httparty'
+require 'core_extensions'
+require 'uri'
+require 'pry-byebug'
