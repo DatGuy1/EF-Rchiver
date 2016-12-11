@@ -3,31 +3,34 @@ require 'datbot'
 #https://github.com/MusikAnimal/MusikBot/blob/master/tasks/perm_clerk.rb
 #Apache License 2.0, see directory
 module EFrchiver
+  
+  SPLIT_KEY = '==='.freeze
+  
   def self.run
     @db = DatBot::Session.new(inspect)
     
     @denied_cache = {}
     @archive_changes = {}
+    @total_filter_count = 0
     @errors = {}
     
-    
-    @db.config[:pages].keys.each do |permission|
-      @permission = permission.to_s
+    @db.config[:pages].keys.each do |section|
+      @section = section.to_s
       @edit_summaries = []
       @headers_removed = {}
-      @users_count = 0
+      @requests_count = 0
 
       begin
         @flag_as_ran = false
-        process_permission
+        process_section
 
         if @flag_as_ran
-          @total_user_count += @users_count
-          run_status[@permission] = @db.now.to_s
+          @total_requests_count += @requests_count
+          run_status[@section] = @db.now.to_s
         end
       rescue => e
-        @db.report_error("Failed to process #{permission}", e)
-        @errors[@permission] = @errors[@permission].to_a << {
+        @db.report_error("Failed to process #{section}", e)
+        @errors[@section] = @errors[@section].to_a << {
           group: 'fatal',
           message: 'Failed for unknown reasons. Check the [[User:DatBot/Error log|error log]] ' \
             'and contact the [[User talk:DatGuy|bot operator]] if you are unable to resolve the issue.'
@@ -49,7 +52,7 @@ module EFrchiver
     if throttle > 3
       @db.report_error('Edit throttle hit', e)
     elsif e.code.to_s == 'editconflict'
-      process_permission(throttle + 1)
+      process_section(throttle + 1)
     else
       raise
     end
@@ -58,13 +61,9 @@ module EFrchiver
     
     @section = section
     @request_changes = []
-    username = @section.scan(/{{(?:template\:)?rfplinks\|1=(.*?)}}/i).flatten[0]
-    return SPLIT_KEY + @section unless username
-    username[0] = username[0].capitalize
-    username.strip!
-    @username = username.descore
 
-    info("Checking section for User:#{@username}...")
+    info("Checking #{@section}...")
+    page_name = "Wikipedia:Edit filter/Requested"
 
     timestamps = @section.scan(/(?<!\<!-- dbdate --\> )\b\d\d:\d\d, \d+ \w+ \d{4} \(UTC\)/)
     @newest_timestamp = @db.parse_date(timestamps.min { |a, b| @db.parse_date(b) <=> @db.parse_date(a) })
@@ -78,16 +77,13 @@ module EFrchiver
                              false
                            end
 
-    info('Resolution override found') if overriden_resolution
+    info('    Resolution override found') if overriden_resolution
 
-    done_regex = @db.config[:archive_config][:done]
-    notdone_regex = @db.config[:archive_config][:notdone]
-    revoked_regex = @db.config[:archive_config][:revoked]
+    done_regex = @db.config[:archive_config][:complete]
+    notdone_regex = @db.config[:archive_config][:nope]
 
     resolution = if overriden_resolution
                    overriden_resolution
-                 elsif @section =~ /(?:#{revoked_regex})/i
-                   'revoked'
                  elsif @section =~ /(?:#{done_regex})/i
                    'done'
                  elsif @section =~ /(?:#{notdone_regex})/i
@@ -112,42 +108,25 @@ module EFrchiver
 
     # determine if there's any else to be done
     if resolution
-      info("  #{@username}'s request already responded to")
+      info("  The #{@section} request has already been responded to")
       @new_wikitext << SPLIT_KEY + @section
       return
     end
 
     @open_timestamps << timestamps.min { |a, b| @db.parse_date(a) <=> @db.parse_date(b) }
-    @should_update_prereq_data = should_update_prereq_data
-
-    if @section.match(/{{comment\|Automated comment}}.*MusikBot/) && !@should_update_prereq_data
-      info("DatBot has already commented on #{username}'s request and no prerequisite data to update")
-      @new_wikitext << SPLIT_KEY + @section
-      return
-    end
-
-    # these tasks have already been ran if we're just updating prereq data
-    unless @should_update_prereq_data
-      # autoformat first, especially the case for Confirmed where they have a malformed report and are already autoconfirmed
-      autoformat
-      if autorespond
-        @num_open_requests -= 1
-        return queue_changes
-      end
-      fetch_declined
-      check_revoked
-    end
-    prerequisites
-    queue_changes
-  end
-
+  
+  def self.move
+    info("***** Moving #{section} to completed/denied requests")
+    
+    
+  
   def self.archive_requests
     num_requests = @archive_changes.values.flatten.length
 
     info("***** Archiving #{num_requests} requests *****")
 
     @archive_changes.keys.each do |key|
-      page_to_edit = "Wikipedia:Requests for permissions/#{key}"
+      page_to_edit = "Wikipedia:Edit filter/Requested/#{key}"
       month_name = key.scan(/\/(\w+)/).flatten[0]
       year = key.scan(/\d{4}/).flatten[0]
 
@@ -163,10 +142,10 @@ module EFrchiver
       sections = Hash[*page_wikitext.split(/\=\=\s*(\w+ \d+)\s*\=\=/).drop(1).flatten(1)]
 
       @archive_changes[key].each do |request|
-        edit_summary += " #{request[:username]} (#{request[:permission].downcase});"
-        archive_page_name = "Wikipedia:Requests for permissions/#{request[:permission]}"
-        link_markup = "*{{Usercheck-short|#{request[:username]}}} [[#{archive_page_name}]] " \
-          "<sup>[http://en.wikipedia.org/wiki/Special:PermaLink/#{request[:revision_id]}#User:#{request[:username].score} link]</sup>"
+        edit_summary += " Request title was \"#{section}.downcase\"});"
+        archive_page_name = "Wikipedia:Edit filter/Requested"
+        link_markup = "*#{section} [[#{archive_page_name}]] " \
+          "<sup>[http://en.wikipedia.org/wiki/Special:PermaLink/#{request[:revision_id]}#{request[:section]} link]</sup>"
 
         # add link_markup to section
         section_key = "#{month_name} #{request[:date].day}"
@@ -185,7 +164,7 @@ module EFrchiver
 
       # first see if it's a new page and if so add it to the log page
       if new_page
-        log_page_name = "Wikipedia:Requests for permissions/#{key.scan(/(.*)\//).flatten[0]}"
+        log_page_name = "Wikipedia:Edit filters/Requested/#{key.scan(/(.*)\//).flatten[0]}"
         info("  Adding new page [[#{page_to_edit}]] to log [[#{log_page_name}]]")
 
         log_page = @db.get(log_page_name)
@@ -238,74 +217,12 @@ module EFrchiver
     else
       info('  Time to archive!')
     end
-
-    # if we're archiving as done, check if they have the said permission and act accordingly (skip if overriding resolution)
-    if resolution == 'done' && !overriden_resolution && !api_relevant_permission
-      if @section.include?('<!-- dbNoPerm -->')
-        warn("    MusikBot already reported that #{@username} does not have the permission #{@permission}")
-        @new_wikitext << SPLIT_KEY + @section
-      else
-        @request_changes << {
-          type: :noSaidPermission,
-          permission: @permission.downcase
-        }
-        @edit_summaries << :noSaidPermission
-
-        queue_changes
-
-        message = if @permission == 'AutoWikiBrowser'
-                    "has not been added to the [[#{AWB_CHECKPAGE}|check page]]"
-                  else
-                    "does not have the permission #{@permission}"
-                  end
-
-        record_error(
-          group: 'archive',
-          message: "User:#{@username} #{message}. " \
-            'Use <code><nowiki>{{subst:User:DatBot/override|d}}</nowiki></code> to archive as approved or ' \
-            '<code><nowiki>{{subst:User:DatBot/override|nd}}</nowiki></code> to archive as declined',
-          log_message: "    #{@username} #{message}"
-        )
-      end
-
-      return true
-    elsif resolution == 'revoked' && !overriden_resolution && api_relevant_permission
-      if @section.include?('<!-- dbHasPerm -->')
-        warn("    MusikBot already reported that #{@username} still has the permission #{@permission}")
-        @new_wikitext << SPLIT_KEY + @section
-      else
-        @request_changes << {
-          type: :saidPermission,
-          permission: @permission.downcase
-        }
-        @edit_summaries << :saidPermission
-
-        queue_changes
-
-        message = if @permission == 'AutoWikiBrowser'
-                    "has not been added to the [[#{AWB_CHECKPAGE}|check page]]"
-                  else
-                    "does not have the permission #{@permission}"
-                  end
-
-        record_error(
-          group: 'archive',
-          message: "User:#{@username} #{message}. " \
-            'Use <code><nowiki>{{subst:User:DatBot/override|d}}</nowiki></code> to archive as approved or ' \
-            '<code><nowiki>{{subst:User:DatBot/override|nd}}</nowiki></code> to archive as declined',
-          log_message: "    #{@username} #{message}"
-        )
-      end
-
-      return true
-    end
-
-    resolution_page_name = resolution == 'done' || resolution == 'revoked' ? 'Approved' : 'Denied'
+    
+    resolution_page_name = resolution == 'done' || resolution == 'notdone' ? 'Approved' : 'Denied'
     info("    archiving as #{resolution_page_name.upcase}")
     archive_key = "#{resolution_page_name}/#{Date::MONTHNAMES[resolution_timestamp.month]} #{resolution_timestamp.year}"
     archive_set = @archive_changes[archive_key].to_a << {
-      username: @username,
-      permission: @permission,
+      section: @section,
       revision_id: @revision_id,
       date: resolution_timestamp
     }
@@ -320,18 +237,19 @@ module EFrchiver
     errors_digest = Digest::MD5.hexdigest(@errors.values.join)
     expired = @total_user_count > 0 && @db.parse_date(run_status['report']) < @db.now - Rational(6, 24)
     return unless run_status['report_errors'] != errors_digest || expired
-
+    ==begin
     if @errors.keys.any?
       num_errors = @errors.values.flatten.length
       content = '{{hidden|style=display:inline-block;background:transparent|headerstyle=padding-right:3.5em|header=' \
         "<span style='color:red;font-weight:bold'>#{num_errors} error#{'s' if num_errors > 1} as of ~~~~~</span>|content="
-      @errors.keys.each do |permission_group|
+      ###@errors.keys.each do |permission_group|
         content += "\n;[[Wikipedia:Requests for permissions/#{permission_group}|#{permission_group}]]\n"
         @errors[permission_group].each do |error|
           group = error[:group] == 'fatal' ? 'FATAL' : error[:group].capitalize
           content += "* '''#{group}''': #{error[:message]}\n"
         end
       end
+    ==end
       content += '}}'
     else
       content = "<span style='color:green; font-weight:bold'>No errors!</span> Report generated at ~~~~~"
@@ -341,9 +259,9 @@ module EFrchiver
     run_status['report_errors'] = errors_digest
 
     info('Updating report...')
-    @db.edit('User:DatBot/PermClerk/Report',
+    @db.edit('User:DatBot/Report',
       content: content,
-      summary: 'Updating [[User:DatBot/PermClerk|PermClerk]] report'
+      summary: 'Updating [[User:DatBot/EFRchiver|EFRchiver]] report'
     )
   end
   def self.perm_edit_summary
@@ -362,15 +280,7 @@ module EFrchiver
 
     plural = @users_count > 1
 
-    summaries << "marked request#{'s' if plural} as already done" if @edit_summaries.include?(:autorespond)
-    summaries << "repaired malformed request#{'s' if plural}" if @edit_summaries.include?(:autoformat)
-    summaries << 'prerequisite data updated' if @edit_summaries.include?(:prerequisitesUpdated)
-    summaries << 'unmet prerequisites' if @edit_summaries.include?(:prerequisites)
-    summaries << 'found previously declined requests' if @edit_summaries.include?(:fetchdeclined)
-    summaries << 'found previous revocations' if @edit_summaries.include?(:checkrevoked)
     summaries << 'unable to archive one or more requests' if @edit_summaries.include?(:noSaidPermission) || @edit_summaries.include?(:saidPermission)
-    summaries << '{{WP:PERM/Backlog}}' if @edit_summaries.include?(:backlog)
-    summaries << '{{WP:PERM/Backlog|none}}' if @edit_summaries.include?(:no_backlog)
 
     request_count_msg = if @num_open_requests > 0
                           "#{@num_open_requests} open request#{'s' if @num_open_requests > 1} remaining"
@@ -383,39 +293,15 @@ module EFrchiver
 
   # Config-related
   def self.run_status
-    @run_status ||= @mb.local_storage
+    @run_status ||= @db.local_storage
   end
 
   def self.prereqs
-    @mb.config[:run][:prerequisites] ? @mb.config[:prerequisites_config][@permission.to_sym] : nil
-  end
-
-  # API-related
-  def self.api_relevant_permission
-    info("  checking if #{@username} has permission #{@permission}")
-    return @permission if sysop?
-
-    if @permission == 'AutoWikiBrowser'
-      awb_checkpage_content =~ /\n\*\s*#{Regexp.escape(@username)}\s*\n/ ? 'AutoWikiBrowser' : nil
-    else
-      get_user_info(@username)[:userGroups].grep(/#{@mb.config[:pages][@permission.to_sym]}/).first
-    end
-  end
-    def self.page_props(page)
-    page_obj = @mb.get_page_props(page, full_response: true)
-    @revision_id = page_obj.attributes['lastrevid']
-    @last_edit = @mb.parse_date(page_obj.elements['revisions'][0].attributes['timestamp'])
-    page_obj.elements['revisions/rev'].text
-  rescue
-    record_error(
-      group: 'fatal',
-      message: "The page [[#{page}]] does not exist!"
-    )
-    nil
+    @db.config[:run][:prerequisites] ? @db.config[:prerequisites_config][@section.to_sym] : nil
   end
 
   def self.record_error(opts)
-    error_set = opts[:error_set] || @permission
+    error_set = opts[:error_set] || @section
     @errors[error_set] = @errors[error_set].to_a << {
       group: opts[:group],
       message: opts[:message]
@@ -423,10 +309,10 @@ module EFrchiver
     error(opts[:log_message])
   end
 
-  def self.info(msg); log("#{@permission.upcase} : #{msg}"); end
-  def self.warn(msg); log("#{@permission.upcase} | WARN : #{msg}"); end
-  def self.error(msg); log("#{@permission.upcase} | ERROR : #{msg}"); end
-  def self.log(message); puts(@mb.now.strftime("%e %b %H:%M:%S | #{message}")); end
+  def self.info(msg); log("#{@section.upcase} : #{msg}"); end
+  def self.warn(msg); log("#{@section.upcase} | WARN : #{msg}"); end
+  def self.error(msg); log("#{@section.upcase} | ERROR : #{msg}"); end
+  def self.log(message); puts(@db.now.strftime("%e %b %H:%M:%S | #{message}")); end
 end
 
 EFrchiver.run
